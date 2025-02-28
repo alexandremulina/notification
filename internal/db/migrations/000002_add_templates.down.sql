@@ -1,0 +1,2 @@
+--down
+DROP TABLE templates;
