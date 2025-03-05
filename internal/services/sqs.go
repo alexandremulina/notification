@@ -62,7 +62,7 @@ func (s *SQSService) ReceiveMessage(ctx context.Context) (*sqs.ReceiveMessageOut
 
 	input := &sqs.ReceiveMessageInput{
 		QueueUrl:            aws.String(s.queueURL),
-		MaxNumberOfMessages: 1,
+		MaxNumberOfMessages: 10,
 		WaitTimeSeconds:     5,
 	}
 
@@ -76,7 +76,10 @@ func (s *SQSService) ReceiveMessage(ctx context.Context) (*sqs.ReceiveMessageOut
 
 	// Process messages and send to SNS if available
 	if len(result.Messages) > 0 && s.snsService != nil {
-		go s.processAndSendToSNS(context.Background(), &result.Messages[0])
+		// Process all messages in the batch
+		for i := range result.Messages {
+			go s.processAndSendToSNS(context.Background(), &result.Messages[i])
+		}
 	}
 
 	return result, nil
@@ -175,4 +178,40 @@ func (s *SQSService) DeleteMessage(ctx context.Context, receiptHandle string) er
 
 	s.logger.Info("Message deleted from SQS queue")
 	return nil
+}
+
+// ReceiveMessageWithCount receives messages with a specific batch size
+func (s *SQSService) ReceiveMessageWithCount(ctx context.Context, maxMessages int32) (*sqs.ReceiveMessageOutput, error) {
+	s.logger.Info("Polling SQS queue for messages", "queueURL", s.queueURL, "maxMessages", maxMessages)
+
+	// Ensure maxMessages is within allowed range (1-10)
+	if maxMessages < 1 {
+		maxMessages = 1
+	} else if maxMessages > 10 {
+		maxMessages = 10
+	}
+
+	input := &sqs.ReceiveMessageInput{
+		QueueUrl:            aws.String(s.queueURL),
+		MaxNumberOfMessages: maxMessages,
+		WaitTimeSeconds:     5,
+	}
+
+	result, err := s.client.ReceiveMessage(ctx, input)
+	if err != nil {
+		s.logger.Error("Failed to receive message from SQS", "error", err)
+		return nil, fmt.Errorf("failed to receive message from SQS: %w", err)
+	}
+
+	s.logger.Info("SQS poll completed", "messagesReceived", len(result.Messages))
+
+	// Process messages and send to SNS if available
+	if len(result.Messages) > 0 && s.snsService != nil {
+		// Process all messages in the batch
+		for i := range result.Messages {
+			go s.processAndSendToSNS(context.Background(), &result.Messages[i])
+		}
+	}
+
+	return result, nil
 }

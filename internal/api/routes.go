@@ -28,7 +28,6 @@ func setupRoutes(s *Server) {
 			notifications.GET("/:id", notificationHandler.Get)
 
 			// GET /api/v1/notifications - Poll SQS queue for messages
-
 			notifications.GET("", notificationHandler.PollSQS)
 
 			// POST /api/v1/notifications/polling - Toggle polling
@@ -36,6 +35,12 @@ func setupRoutes(s *Server) {
 
 			// GET /api/v1/notifications/polling/metrics - Get polling metrics
 			notifications.GET("/polling/metrics", notificationHandler.GetMetrics)
+
+			// GET /api/v1/notifications/metrics - Get polling metrics
+			notifications.GET("/metrics", notificationHandler.GetMetrics)
+
+			// POST /api/v1/notifications/worker-config - Configure worker pool
+			notifications.POST("/worker-config", notificationHandler.ConfigureWorkerPool)
 		}
 	}
 }
