@@ -2,10 +2,9 @@ package services
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+
 	"go-data-distributor-notification/internal/config"
-	"go-data-distributor-notification/internal/dto"
 	"log/slog"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -86,55 +85,16 @@ func (s *SQSService) ReceiveMessage(ctx context.Context) (*sqs.ReceiveMessageOut
 }
 
 func (s *SQSService) processAndSendToSNS(ctx context.Context, message *types.Message) {
-	s.logger.Info("Processing SQS message for SNS", "messageId", *message.MessageId)
+	s.logger.Info("Forwarding SQS message to SNS", "messageId", *message.MessageId)
 
-	var messageData map[string]interface{}
-	if err := json.Unmarshal([]byte(*message.Body), &messageData); err != nil {
-		s.logger.Error("Failed to parse SQS message body", "error", err)
-		return
-	}
-
-	// Extract necessary information for the Slack notification
-	userId := getStringValue(messageData, "userId", "unknown-user")
-	tenantId := getStringValue(messageData, "tenantId", "unknown-tenant")
-
-	// Create a consent document from the message data
-	consent := dto.ConsentDocument{
-		ConsentID:   getStringValue(messageData, "consentId", fmt.Sprintf("consent-%s", *message.MessageId)),
-		Status:      getStringValue(messageData, "status", "PENDING"),
-		Permissions: getStringArray(messageData, "permissions"),
-	}
-
-	// Create contact info if available
-	var contactInfo *dto.ContactInfo
-	email := getStringValue(messageData, "email", "")
-	phone := getStringValue(messageData, "phone", "")
-
-	if email != "" || phone != "" {
-		contactInfo = &dto.ContactInfo{
-			Email: email,
-			Phone: phone,
-		}
-	}
-
-	// Create the Slack notification
-	notification := dto.CreateSlackConsentNotification(consent, userId, tenantId, contactInfo)
-
-	// Convert to JSON
-	notificationJSON, err := json.Marshal(notification)
-	if err != nil {
-		s.logger.Error("Failed to marshal Slack notification", "error", err)
-		return
-	}
-
-	// Send to SNS
-	messageId, err := s.snsService.PublishMessage(ctx, string(notificationJSON))
+	// Forward the original message body to SNS
+	messageId, err := s.snsService.PublishMessage(ctx, *message.Body)
 	if err != nil {
 		s.logger.Error("Failed to publish message to SNS", "error", err)
 		return
 	}
 
-	s.logger.Info("Successfully sent message to SNS", "snsMessageId", messageId)
+	s.logger.Info("Successfully forwarded message to SNS", "snsMessageId", messageId)
 }
 
 // Helper functions to safely extract values from the message data
