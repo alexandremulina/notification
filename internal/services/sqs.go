@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"go-data-distributor-notification/internal/config"
@@ -14,10 +15,11 @@ import (
 )
 
 type SQSService struct {
-	client     *sqs.Client
-	queueURL   string
-	logger     *slog.Logger
-	snsService *SNSService
+	client       *sqs.Client
+	queueURL     string
+	logger       *slog.Logger
+	snsService   *SNSService
+	mongoService *MongoDBService
 }
 
 func NewSQSService(logger *slog.Logger) (*SQSService, error) {
@@ -44,15 +46,22 @@ func NewSQSService(logger *slog.Logger) (*SQSService, error) {
 		logger.Warn("Failed to initialize SNS service, SNS notifications will be disabled", "error", err)
 	}
 
+	// Initialize MongoDB service
+	mongoService, err := NewMongoDBService(logger)
+	if err != nil {
+		logger.Warn("Failed to initialize MongoDB service, tenant lookups will be disabled", "error", err)
+	}
+
 	logger.Info("SQS service initialized",
 		"queueURL", config.GlobalConfig.AWSSQSURL,
 		"region", config.GlobalConfig.AWSRegion)
 
 	return &SQSService{
-		client:     client,
-		queueURL:   config.GlobalConfig.AWSSQSURL,
-		logger:     logger,
-		snsService: snsService,
+		client:       client,
+		queueURL:     config.GlobalConfig.AWSSQSURL,
+		logger:       logger,
+		snsService:   snsService,
+		mongoService: mongoService,
 	}, nil
 }
 
@@ -87,14 +96,80 @@ func (s *SQSService) ReceiveMessage(ctx context.Context) (*sqs.ReceiveMessageOut
 func (s *SQSService) processAndSendToSNS(ctx context.Context, message *types.Message) {
 	s.logger.Info("Forwarding SQS message to SNS", "messageId", *message.MessageId)
 
-	// Forward the original message body to SNS
-	messageId, err := s.snsService.PublishMessage(ctx, *message.Body)
+	// Default webhook URL as fallback
+	var webhookURL string
+	var emailAddress string
+	var webhookAddress string
+
+	var messageData map[string]interface{}
+	if err := json.Unmarshal([]byte(*message.Body), &messageData); err != nil {
+		s.logger.Error("Failed to parse message body", "error", err)
+	} else {
+		tenantID := getStringValue(messageData, "tenantId", "")
+
+		if tenantID != "" && s.mongoService != nil {
+			s.logger.Info("Fetching tenant channels", "tenantId", tenantID)
+			tenantChannels, err := s.mongoService.FindTenantChannels(ctx, tenantID)
+			if err != nil {
+				s.logger.Error("Failed to fetch tenant channels", "error", err, "tenantId", tenantID)
+			} else if tenantChannels != nil {
+				for _, channel := range tenantChannels.Channels {
+					if channel.Enable {
+						switch channel.Type {
+						case "slack":
+							webhookURL = channel.Value
+							s.logger.Info("Using Slack webhook URL from MongoDB", "slackWebhookUrl", webhookURL, "tenantId", tenantID)
+						case "email":
+							emailAddress = channel.Value
+							s.logger.Info("Using email from MongoDB", "email", emailAddress, "tenantId", tenantID)
+						case "webhook":
+							webhookAddress = channel.Value
+							s.logger.Info("Using webhook from MongoDB", "webhook", webhookAddress, "tenantId", tenantID)
+						}
+					}
+				}
+			}
+		} else {
+			if url, ok := messageData["webhookUrl"].(string); ok && url != "" {
+				webhookURL = url
+				s.logger.Info("Using webhook URL from message", "webhookUrl", webhookURL)
+			}
+		}
+	}
+
+	messageWithChannels := map[string]interface{}{
+		"originalMessage": *message.Body,
+		"slackWebhookUrl": webhookURL,
+		"email":           emailAddress,
+	}
+
+	// Add email address if found
+	if emailAddress != "" {
+		messageWithChannels["email"] = emailAddress
+	}
+
+	// Add webhook address if found
+	if webhookAddress != "" {
+		messageWithChannels["webhook"] = webhookAddress
+	}
+
+	messageBytes, err := json.Marshal(messageWithChannels)
+	if err != nil {
+		s.logger.Error("Failed to marshal message with channels", "error", err)
+		return
+	}
+
+	messageId, err := s.snsService.PublishMessage(ctx, string(messageBytes))
 	if err != nil {
 		s.logger.Error("Failed to publish message to SNS", "error", err)
 		return
 	}
 
-	s.logger.Info("Successfully forwarded message to SNS", "snsMessageId", messageId)
+	s.logger.Info("Successfully forwarded message to SNS",
+		"snsMessageId", messageId,
+		"hasSlack", webhookURL != "",
+		"hasEmail", emailAddress != "",
+		"hasWebhook", webhookAddress != "")
 }
 
 // Helper functions to safely extract values from the message data

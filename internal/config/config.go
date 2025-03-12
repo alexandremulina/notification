@@ -43,6 +43,9 @@ type Config struct {
 
 	// AWS SNS configuration
 	AWSSNSTopicARN string
+
+	// MongoDB configuration
+	MongoURL string
 }
 
 var GlobalConfig *Config
@@ -79,6 +82,9 @@ func Load(logger *slog.Logger) *Config {
 
 		// AWS SNS configuration
 		AWSSNSTopicARN: getEnvOrDefault("AWS_SNS_TOPIC_ARN", "arn:aws:sns:us-east-1:471112700878:data-link-topic", logger),
+
+		// MongoDB configuration
+		MongoURL: getEnvOrDefault("MONGO_URL", "", logger),
 	}
 
 	return GlobalConfig

@@ -26,7 +26,6 @@ type NotificationHandler struct {
 	pollingCtx          context.Context    // New field to hold the context
 	stopMutex           sync.Mutex         // Mutex for stopping operations
 	workerPool          chan types.Message
-	workerWaitGroup     sync.WaitGroup
 	numWorkers          int
 	metrics             struct {
 		messagesProcessed int64
@@ -91,11 +90,6 @@ func (h *NotificationHandler) StartPolling() {
 
 	h.isPolling = true
 
-	// Create a new worker pool channel
-	h.workerPool = make(chan types.Message, 100)
-
-	h.startWorkerPool()
-
 	go func() {
 		baseInterval := 2 * time.Second
 		minInterval := 500 * time.Millisecond
@@ -106,14 +100,11 @@ func (h *NotificationHandler) StartPolling() {
 			select {
 			case <-h.pollingCtx.Done():
 				h.isPolling = false
-				// Close the worker pool channel to signal workers to exit
-				close(h.workerPool)
-				h.workerWaitGroup.Wait()
-				log.Println("Polling stopped gracefully, all workers terminated")
+				log.Println("Polling stopped")
 				return
 			default:
 				startTime := time.Now()
-				messageCount, err := h.adaptivePollAndProcess()
+				messageCount, err := h.pollAndProcessDirectly()
 				if err != nil {
 					log.Printf("Error in polling cycle: %v", err)
 					h.metrics.mu.Lock()
@@ -122,10 +113,8 @@ func (h *NotificationHandler) StartPolling() {
 				}
 
 				if messageCount > 10 {
-					// High volume - poll more frequently
 					currentInterval = minFloat(minInterval, currentInterval/2)
 				} else if messageCount == 0 {
-					// No messages - poll less frequently
 					newInterval := time.Duration(float64(currentInterval) * 1.5)
 					if newInterval > maxInterval {
 						newInterval = maxInterval
@@ -136,7 +125,6 @@ func (h *NotificationHandler) StartPolling() {
 				elapsed := time.Since(startTime)
 				sleepTime := currentInterval - elapsed
 				if sleepTime > 0 {
-					// Use context-aware sleep
 					select {
 					case <-h.pollingCtx.Done():
 						return
@@ -149,95 +137,14 @@ func (h *NotificationHandler) StartPolling() {
 	}()
 }
 
-func (h *NotificationHandler) startWorkerPool() {
-	// Reset wait group
-	h.workerWaitGroup = sync.WaitGroup{}
-
-	// Start workers
-	for i := 0; i < h.numWorkers; i++ {
-		h.workerWaitGroup.Add(1)
-		workerID := i
-
-		go func() {
-			defer h.workerWaitGroup.Done()
-
-			log.Printf("Starting worker %d", workerID)
-			h.metrics.mu.Lock()
-			h.metrics.activeWorkers++
-			h.metrics.mu.Unlock()
-
-			// Worker processing loop
-			for {
-				select {
-				case message, ok := <-h.workerPool:
-					if !ok {
-						// Channel closed, exit
-						log.Printf("Worker %d shutting down (channel closed)", workerID)
-						h.metrics.mu.Lock()
-						h.metrics.activeWorkers--
-						h.metrics.mu.Unlock()
-						return
-					}
-
-					// Create a derived context with timeout for this message processing
-					msgCtx, cancel := context.WithTimeout(h.pollingCtx, 30*time.Second)
-
-					// Process message
-					if err := h.processMessageWithRetries(msgCtx, message); err != nil {
-						log.Printf("Worker %d: Failed to process message after retries: %v", workerID, err)
-						h.metrics.mu.Lock()
-						h.metrics.errors++
-						h.metrics.mu.Unlock()
-						cancel()
-						continue
-					}
-
-					// Delete message
-					if err := h.deleteMessageWithRetries(msgCtx, *message.ReceiptHandle); err != nil {
-						log.Printf("Worker %d: Failed to delete message after retries: %v", workerID, err)
-						h.metrics.mu.Lock()
-						h.metrics.errors++
-						h.metrics.mu.Unlock()
-						cancel()
-						continue
-					}
-
-					// Update success metric
-					h.metrics.mu.Lock()
-					h.metrics.messagesProcessed++
-					h.metrics.mu.Unlock()
-
-					// Release resources
-					cancel()
-
-				case <-h.pollingCtx.Done():
-					// Context canceled, exit
-					log.Printf("Worker %d shutting down (context canceled)", workerID)
-					h.metrics.mu.Lock()
-					h.metrics.activeWorkers--
-					h.metrics.mu.Unlock()
-					return
-				}
-			}
-		}()
-	}
-}
-
-func (h *NotificationHandler) adaptivePollAndProcess() (int, error) {
+func (h *NotificationHandler) pollAndProcessDirectly() (int, error) {
 	// Use the polling context to ensure it respects cancellation
 	if h.pollingCtx == nil {
 		return 0, fmt.Errorf("polling context is nil")
 	}
 
-	// Calculate optimal batch size based on worker availability
-	h.metrics.mu.RLock()
-	activeWorkers := h.metrics.activeWorkers
-	h.metrics.mu.RUnlock()
-
-	batchSize := min(10, max(1, activeWorkers*2)) // Adjust formula as needed
-
-	// Receive messages from SQS with the calculated batch size
-	result, err := h.sqsService.ReceiveMessageWithCount(h.pollingCtx, int32(batchSize))
+	// Receive messages from SQS
+	result, err := h.sqsService.ReceiveMessageWithCount(h.pollingCtx, int32(10)) // Fixed batch size
 	if err != nil {
 		// Check if the context was canceled
 		if errors.Is(err, context.Canceled) {
@@ -257,28 +164,43 @@ func (h *NotificationHandler) adaptivePollAndProcess() (int, error) {
 		return messageCount, nil
 	}
 
-	// Send messages to worker pool
+	// Process messages directly in this goroutine
 	for _, message := range result.Messages {
 		// Recheck polling status before each message
 		if !h.isPolling || h.pollingCtx.Err() != nil {
 			break
 		}
 
-		// Try to send to worker pool with timeout to avoid blocking forever
-		select {
-		case h.workerPool <- message:
-			// Successfully sent to worker
-		case <-time.After(2 * time.Second):
-			log.Printf("Worker pool is full, skipping message %s", *message.MessageId)
-		case <-h.pollingCtx.Done():
-			// Context was canceled
-			return messageCount, nil
-		default:
-			// Channel is closed or full, don't block
-			if h.isPolling {
-				log.Printf("Failed to send message %s to worker pool", *message.MessageId)
-			}
+		// Create a derived context with timeout for this message processing
+		msgCtx, cancel := context.WithTimeout(h.pollingCtx, 30*time.Second)
+
+		// Process message with retries
+		if err := h.processMessageWithRetries(msgCtx, message); err != nil {
+			log.Printf("Failed to process message after retries: %v", err)
+			h.metrics.mu.Lock()
+			h.metrics.errors++
+			h.metrics.mu.Unlock()
+			cancel()
+			continue
 		}
+
+		// Delete message with retries
+		if err := h.deleteMessageWithRetries(msgCtx, *message.ReceiptHandle); err != nil {
+			log.Printf("Failed to delete message after retries: %v", err)
+			h.metrics.mu.Lock()
+			h.metrics.errors++
+			h.metrics.mu.Unlock()
+			cancel()
+			continue
+		}
+
+		// Update success metric
+		h.metrics.mu.Lock()
+		h.metrics.messagesProcessed++
+		h.metrics.mu.Unlock()
+
+		// Release resources
+		cancel()
 	}
 
 	return messageCount, nil
@@ -414,21 +336,6 @@ func (h *NotificationHandler) StopPolling() {
 	if h.cancelPolling != nil {
 		h.cancelPolling()
 		log.Println("Cancel signal sent to polling context")
-	}
-
-	// Wait for all workers to finish with a timeout
-	waitCh := make(chan struct{})
-	go func() {
-		h.workerWaitGroup.Wait()
-		close(waitCh)
-	}()
-
-	// Wait with timeout
-	select {
-	case <-waitCh:
-		log.Println("All workers terminated gracefully")
-	case <-time.After(5 * time.Second):
-		log.Println("Timed out waiting for workers to terminate")
 	}
 
 	log.Println("Polling stopped")
