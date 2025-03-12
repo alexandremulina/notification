@@ -43,7 +43,7 @@ func NewNotificationHandler(notificationService *services.NotificationService, s
 		sqsService:          sqsService,
 		stopMutex:           sync.Mutex{},
 		workerPool:          make(chan types.Message, 100),
-		numWorkers:          10, // Default worker count - can be made configurable
+		numWorkers:          10,
 	}
 
 	// Start polling automatically
@@ -79,8 +79,15 @@ func (h *NotificationHandler) Get(c *gin.Context) {
 	c.JSON(http.StatusOK, notification)
 }
 
+// StartPolling begins continuous long polling of the SQS queue.
+// This implementation uses AWS SQS's long polling capability, where:
+// 1. Each ReceiveMessage call waits up to 20 seconds for messages to arrive
+// 2. If messages arrive during that time, SQS returns them immediately
+// 3. If no messages arrive during that time, the call returns empty after 20 seconds
+// 4. A new call is made immediately after each response, with no artificial delay
+// Long polling reduces the number of empty responses and is more efficient
+// than short polling, as it maintains fewer connections and reduces API calls.
 func (h *NotificationHandler) StartPolling() {
-	// Use mutex to ensure thread safety
 	h.stopMutex.Lock()
 	defer h.stopMutex.Unlock()
 
@@ -96,10 +103,7 @@ func (h *NotificationHandler) StartPolling() {
 	h.isPolling = true
 
 	go func() {
-		baseInterval := 2 * time.Second
-		minInterval := 500 * time.Millisecond
-		maxInterval := 10 * time.Second
-		currentInterval := baseInterval
+		log.Println("Starting SQS long polling")
 
 		for {
 			select {
@@ -108,7 +112,8 @@ func (h *NotificationHandler) StartPolling() {
 				log.Println("Polling stopped")
 				return
 			default:
-				startTime := time.Now()
+				// Call pollAndProcessDirectly immediately and continuously
+				// Each call will wait for up to 20 seconds at the SQS level
 				messageCount, err := h.pollAndProcessDirectly()
 				if err != nil {
 					log.Printf("Error in polling cycle: %v", err)
@@ -117,43 +122,33 @@ func (h *NotificationHandler) StartPolling() {
 					h.metrics.mu.Unlock()
 				}
 
-				if messageCount > 10 {
-					currentInterval = minFloat(minInterval, currentInterval/2)
-				} else if messageCount == 0 {
-					newInterval := time.Duration(float64(currentInterval) * 1.5)
-					if newInterval > maxInterval {
-						newInterval = maxInterval
-					}
-					currentInterval = newInterval
+				// Log the message count for monitoring purposes
+				if messageCount > 0 {
+					log.Printf("Processed %d messages from SQS", messageCount)
 				}
 
-				elapsed := time.Since(startTime)
-				sleepTime := currentInterval - elapsed
-				if sleepTime > 0 {
-					select {
-					case <-h.pollingCtx.Done():
-						return
-					case <-time.After(sleepTime):
-						// Continue polling
-					}
-				}
+				// No delay between polls - true long polling
+				// The next poll starts immediately
 			}
 		}
 	}()
 }
 
+// pollAndProcessDirectly implements long polling by making a single SQS request that
+// waits for up to 20 seconds, then processes any received messages.
+// The SQS WaitTimeSeconds parameter (set to 20) enables true long polling,
+// which reduces empty responses and is more efficient than short polling.
+// When messages arrive, SQS returns immediately rather than waiting for the full duration.
 func (h *NotificationHandler) pollAndProcessDirectly() (int, error) {
-	// Use the polling context to ensure it respects cancellation
 	if h.pollingCtx == nil {
 		return 0, fmt.Errorf("polling context is nil")
 	}
 
-	// Receive messages from SQS
-	result, err := h.sqsService.ReceiveMessageWithCount(h.pollingCtx, int32(10), int32(10)) // Fixed batch size
+	// Receive messages from SQS with 20-second long polling
+	result, err := h.sqsService.ReceiveMessageWithCount(h.pollingCtx, int32(10), int32(20)) // 20-second wait time for long polling
 	if err != nil {
-		// Check if the context was canceled
 		if errors.Is(err, context.Canceled) {
-			return 0, nil // Gracefully handle cancellation
+			return 0, nil
 		}
 		return 0, fmt.Errorf("failed to receive message: %w", err)
 	}
@@ -164,14 +159,12 @@ func (h *NotificationHandler) pollAndProcessDirectly() (int, error) {
 
 	messageCount := len(result.Messages)
 
-	// Only process messages if we're still polling
 	if !h.isPolling || h.pollingCtx.Err() != nil {
 		return messageCount, nil
 	}
 
-	// Process messages directly in this goroutine
 	for _, message := range result.Messages {
-		// Recheck polling status before each message
+
 		if !h.isPolling || h.pollingCtx.Err() != nil {
 			break
 		}
@@ -211,13 +204,6 @@ func (h *NotificationHandler) pollAndProcessDirectly() (int, error) {
 	return messageCount, nil
 }
 
-func minFloat(a, b time.Duration) time.Duration {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func (h *NotificationHandler) GetMetrics(c *gin.Context) {
 	h.metrics.mu.RLock()
 	lastPollTime := h.metrics.lastPollTime
@@ -227,8 +213,9 @@ func (h *NotificationHandler) GetMetrics(c *gin.Context) {
 	activeWorkers := h.metrics.activeWorkers
 	h.metrics.mu.RUnlock()
 
-	// Calculate actual polling state
-	actuallyActive := time.Since(lastPollTime) < 5*time.Second
+	// With long polling, consider polling active if last poll was within the last 25 seconds
+	// (20 seconds max wait time + 5 seconds buffer for processing)
+	actuallyActive := time.Since(lastPollTime) < 25*time.Second
 
 	metrics := gin.H{
 		"isPolling":          h.isPolling,
@@ -242,6 +229,8 @@ func (h *NotificationHandler) GetMetrics(c *gin.Context) {
 		"totalWorkers":       h.numWorkers,
 		"workerPoolCapacity": cap(h.workerPool),
 		"workerPoolUsage":    len(h.workerPool),
+		"longPollingEnabled": true,
+		"maxWaitTime":        "20 seconds",
 	}
 
 	c.JSON(http.StatusOK, metrics)
@@ -270,8 +259,9 @@ func (h *NotificationHandler) TogglePolling(c *gin.Context) {
 	lastPollTime := h.metrics.lastPollTime
 	h.metrics.mu.RUnlock()
 
-	// Consider polling active if last poll was within the last 5 seconds
-	actuallyActive := time.Since(lastPollTime) < 5*time.Second
+	// Consider polling active if last poll was within the last 25 seconds
+	// (accounts for 20-second long polling wait time)
+	actuallyActive := time.Since(lastPollTime) < 25*time.Second
 
 	if req.Enable {
 		// Only start if not already polling
@@ -297,8 +287,9 @@ func (h *NotificationHandler) TogglePolling(c *gin.Context) {
 }
 
 func (h *NotificationHandler) PollSQS(c *gin.Context) {
-	ctx := context.Background()
-	result, err := h.sqsService.ReceiveMessage(ctx)
+	ctx := c.Request.Context()
+	// Use the same long polling approach with 20-second wait time
+	result, err := h.sqsService.ReceiveMessageWithCount(ctx, int32(10), int32(20))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -425,56 +416,56 @@ func max(a, b int) int {
 	return b
 }
 
-// ConfigureWorkerPool allows dynamic configuration of the worker pool
-func (h *NotificationHandler) ConfigureWorkerPool(c *gin.Context) {
-	var req struct {
-		WorkerCount int `json:"workerCount"`
-		QueueSize   int `json:"queueSize"`
-	}
+// // ConfigureWorkerPool allows dynamic configuration of the worker pool
+// func (h *NotificationHandler) ConfigureWorkerPool(c *gin.Context) {
+// 	var req struct {
+// 		WorkerCount int `json:"workerCount"`
+// 		QueueSize   int `json:"queueSize"`
+// 	}
 
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
+// 	if err := c.ShouldBindJSON(&req); err != nil {
+// 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+// 		return
+// 	}
 
-	// Validate input
-	if req.WorkerCount < 1 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Worker count must be at least 1"})
-		return
-	}
+// 	// Validate input
+// 	if req.WorkerCount < 1 {
+// 		c.JSON(http.StatusBadRequest, gin.H{"error": "Worker count must be at least 1"})
+// 		return
+// 	}
 
-	if req.QueueSize < 1 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Queue size must be at least 1"})
-		return
-	}
+// 	if req.QueueSize < 1 {
+// 		c.JSON(http.StatusBadRequest, gin.H{"error": "Queue size must be at least 1"})
+// 		return
+// 	}
 
-	// If polling is active, stop it first
-	wasPolling := h.isPolling
-	if wasPolling {
-		h.StopPolling()
-	}
+// 	// If polling is active, stop it first
+// 	wasPolling := h.isPolling
+// 	if wasPolling {
+// 		h.StopPolling()
+// 	}
 
-	// Create new worker pool with updated size
-	h.numWorkers = req.WorkerCount
-	h.workerPool = make(chan types.Message, req.QueueSize)
+// 	// Create new worker pool with updated size
+// 	h.numWorkers = req.WorkerCount
+// 	h.workerPool = make(chan types.Message, req.QueueSize)
 
-	// Restart polling if it was active
-	if wasPolling {
-		h.StartPolling()
-	}
+// 	// Restart polling if it was active
+// 	if wasPolling {
+// 		h.StartPolling()
+// 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message":     "Worker pool reconfigured",
-		"workerCount": h.numWorkers,
-		"queueSize":   cap(h.workerPool),
-	})
-}
+// 	c.JSON(http.StatusOK, gin.H{
+// 		"message":     "Worker pool reconfigured",
+// 		"workerCount": h.numWorkers,
+// 		"queueSize":   cap(h.workerPool),
+// 	})
+// }
 
 func (h *NotificationHandler) Initialize() {
 	// Initialize any resources needed
 
-	// Start polling automatically
+	// Start long polling automatically
 	h.StartPolling()
 
-	log.Println("Notification handler initialized and polling started")
+	log.Println("Notification handler initialized and long polling started")
 }

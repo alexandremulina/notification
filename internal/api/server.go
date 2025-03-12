@@ -17,9 +17,8 @@ type Server struct {
 	logger *slog.Logger
 }
 
-func NewServer(cfg *config.Config, logger *slog.Logger, store db.Querier) *Server {
+func NewServer(cfg *config.Config, logger *slog.Logger,) *Server {
 	server := &Server{
-		store:  store,
 		logger: logger,
 	}
 

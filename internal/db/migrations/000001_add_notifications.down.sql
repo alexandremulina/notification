@@ -1,2 +1,0 @@
---down
-DROP TABLE notifications;

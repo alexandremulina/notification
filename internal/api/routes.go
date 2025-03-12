@@ -40,7 +40,7 @@ func setupRoutes(s *Server) {
 			notifications.GET("/metrics", notificationHandler.GetMetrics)
 
 			// POST /api/v1/notifications/worker-config - Configure worker pool
-			notifications.POST("/worker-config", notificationHandler.ConfigureWorkerPool)
+			// notifications.POST("/worker-config", notificationHandler.ConfigureWorkerPool)
 		}
 	}
 }
