@@ -38,13 +38,18 @@ type NotificationHandler struct {
 }
 
 func NewNotificationHandler(notificationService *services.NotificationService, sqsService *services.SQSService) *NotificationHandler {
-	return &NotificationHandler{
+	handler := &NotificationHandler{
 		notificationService: notificationService,
 		sqsService:          sqsService,
 		stopMutex:           sync.Mutex{},
 		workerPool:          make(chan types.Message, 100),
 		numWorkers:          10, // Default worker count - can be made configurable
 	}
+
+	// Start polling automatically
+	handler.StartPolling()
+
+	return handler
 }
 
 func (h *NotificationHandler) Create(c *gin.Context) {
@@ -144,7 +149,7 @@ func (h *NotificationHandler) pollAndProcessDirectly() (int, error) {
 	}
 
 	// Receive messages from SQS
-	result, err := h.sqsService.ReceiveMessageWithCount(h.pollingCtx, int32(10)) // Fixed batch size
+	result, err := h.sqsService.ReceiveMessageWithCount(h.pollingCtx, int32(10), int32(10)) // Fixed batch size
 	if err != nil {
 		// Check if the context was canceled
 		if errors.Is(err, context.Canceled) {
@@ -463,4 +468,13 @@ func (h *NotificationHandler) ConfigureWorkerPool(c *gin.Context) {
 		"workerCount": h.numWorkers,
 		"queueSize":   cap(h.workerPool),
 	})
+}
+
+func (h *NotificationHandler) Initialize() {
+	// Initialize any resources needed
+
+	// Start polling automatically
+	h.StartPolling()
+
+	log.Println("Notification handler initialized and polling started")
 }

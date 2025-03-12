@@ -216,7 +216,7 @@ func (s *SQSService) DeleteMessage(ctx context.Context, receiptHandle string) er
 }
 
 // ReceiveMessageWithCount receives messages with a specific batch size
-func (s *SQSService) ReceiveMessageWithCount(ctx context.Context, maxMessages int32) (*sqs.ReceiveMessageOutput, error) {
+func (s *SQSService) ReceiveMessageWithCount(ctx context.Context, maxMessages int32, waitTimeSeconds int32) (*sqs.ReceiveMessageOutput, error) {
 	s.logger.Info("Polling SQS queue for messages", "queueURL", s.queueURL, "maxMessages", maxMessages)
 
 	// Ensure maxMessages is within allowed range (1-10)
@@ -229,7 +229,13 @@ func (s *SQSService) ReceiveMessageWithCount(ctx context.Context, maxMessages in
 	input := &sqs.ReceiveMessageInput{
 		QueueUrl:            aws.String(s.queueURL),
 		MaxNumberOfMessages: maxMessages,
-		WaitTimeSeconds:     5,
+		WaitTimeSeconds:     waitTimeSeconds,
+		AttributeNames: []types.QueueAttributeName{
+			"All",
+		},
+		MessageAttributeNames: []string{
+			"All",
+		},
 	}
 
 	result, err := s.client.ReceiveMessage(ctx, input)
