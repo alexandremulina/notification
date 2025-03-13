@@ -97,9 +97,10 @@ func (s *SQSService) processAndSendToSNS(ctx context.Context, message *types.Mes
 	s.logger.Info("Forwarding SQS message to SNS", "messageId", *message.MessageId)
 
 	// Default webhook URL as fallback
-	var webhookURL string
+	var slackWebhook string
 	var emailAddress string
 	var webhookAddress string
+	var smsAddress string
 
 	var messageData map[string]interface{}
 	if err := json.Unmarshal([]byte(*message.Body), &messageData); err != nil {
@@ -117,30 +118,35 @@ func (s *SQSService) processAndSendToSNS(ctx context.Context, message *types.Mes
 					if channel.Enable {
 						switch channel.Type {
 						case "slack":
-							webhookURL = channel.Value
-							s.logger.Info("Using Slack webhook URL from MongoDB", "slackWebhookUrl", webhookURL, "tenantId", tenantID)
+							slackWebhook = channel.Value
+							s.logger.Info("Using Slack webhook URL from MongoDB", "slackWebhookUrl", slackWebhook, "tenantId", tenantID)
 						case "email":
 							emailAddress = channel.Value
 							s.logger.Info("Using email from MongoDB", "email", emailAddress, "tenantId", tenantID)
 						case "webhook":
 							webhookAddress = channel.Value
 							s.logger.Info("Using webhook from MongoDB", "webhook", webhookAddress, "tenantId", tenantID)
+						case "sms":
+							smsAddress = channel.Value
+							s.logger.Info("Using SMS from MongoDB", "sms", smsAddress, "tenantId", tenantID)
 						}
 					}
 				}
 			}
 		} else {
 			if url, ok := messageData["webhookUrl"].(string); ok && url != "" {
-				webhookURL = url
-				s.logger.Info("Using webhook URL from message", "webhookUrl", webhookURL)
+				slackWebhook = url
+				s.logger.Info("Using webhook URL from message", "webhookUrl", slackWebhook)
 			}
 		}
 	}
 
 	messageWithChannels := map[string]interface{}{
 		"originalMessage": *message.Body,
-		"slackWebhookUrl": webhookURL,
+		"slackWebhookUrl": slackWebhook,
 		"email":           emailAddress,
+		"webhook":         webhookAddress,
+		"sms":             smsAddress,
 	}
 
 	// Add email address if found
@@ -151,6 +157,11 @@ func (s *SQSService) processAndSendToSNS(ctx context.Context, message *types.Mes
 	// Add webhook address if found
 	if webhookAddress != "" {
 		messageWithChannels["webhook"] = webhookAddress
+	}
+
+	// Add SMS address if found
+	if smsAddress != "" {
+		messageWithChannels["sms"] = smsAddress
 	}
 
 	messageBytes, err := json.Marshal(messageWithChannels)
@@ -167,9 +178,10 @@ func (s *SQSService) processAndSendToSNS(ctx context.Context, message *types.Mes
 
 	s.logger.Info("Successfully forwarded message to SNS",
 		"snsMessageId", messageId,
-		"hasSlack", webhookURL != "",
+		"hasSlack", slackWebhook != "",
 		"hasEmail", emailAddress != "",
-		"hasWebhook", webhookAddress != "")
+		"hasWebhook", webhookAddress != "",
+		"hasSMS", smsAddress != "")
 }
 
 // Helper functions to safely extract values from the message data
@@ -217,7 +229,7 @@ func (s *SQSService) DeleteMessage(ctx context.Context, receiptHandle string) er
 
 // ReceiveMessageWithCount receives messages with a specific batch size
 func (s *SQSService) ReceiveMessageWithCount(ctx context.Context, maxMessages int32, waitTimeSeconds int32) (*sqs.ReceiveMessageOutput, error) {
-	s.logger.Info("Polling SQS queue for messages", "queueURL", s.queueURL, "maxMessages", maxMessages)
+	// s.logger.Info("Polling SQS queue for messages", "queueURL", s.queueURL, "maxMessages", maxMessages)
 
 	// Ensure maxMessages is within allowed range (1-10)
 	if maxMessages < 1 {
@@ -244,7 +256,7 @@ func (s *SQSService) ReceiveMessageWithCount(ctx context.Context, maxMessages in
 		return nil, fmt.Errorf("failed to receive message from SQS: %w", err)
 	}
 
-	s.logger.Info("SQS poll completed", "messagesReceived", len(result.Messages))
+	// s.logger.Info("SQS poll completed", "messagesReceived", len(result.Messages))
 
 	// Process messages and send to SNS if available
 	if len(result.Messages) > 0 && s.snsService != nil {
