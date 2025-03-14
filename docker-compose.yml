@@ -9,15 +9,15 @@ services:
         volumes:
             - ./migrations:/app/migrations
 
-    db:
-        container_name: data-distributor-notification-db
-        image: postgres:13-alpine
-        ports:
-            - "5432:5432"
-        env_file:
-            - ./.env
-        volumes:
-            - pgdata:/var/lib/postgresql/data
+    # db:
+    #     container_name: data-distributor-notification-db
+    #     image: postgres:13-alpine
+    #     ports:
+    #         - "5432:5432"
+    #     env_file:
+    #         - ./.env
+    #     volumes:
+    #         - pgdata:/var/lib/postgresql/data
 
 volumes:
     pgdata: {}

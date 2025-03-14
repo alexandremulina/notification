@@ -108,7 +108,13 @@ func (s *SQSService) processAndSendToSNS(ctx context.Context, message *types.Mes
 	} else {
 		tenantID := getStringValue(messageData, "tenantId", "")
 
+		// Store notification in MongoDB if tenant ID is present and MongoDB service is available
 		if tenantID != "" && s.mongoService != nil {
+			// Store the notification in MongoDB
+			if err := s.mongoService.StoreNotification(ctx, tenantID, *message.Body); err != nil {
+				s.logger.Error("Failed to store notification in MongoDB", "error", err, "tenantId", tenantID)
+			}
+
 			s.logger.Info("Fetching tenant channels", "tenantId", tenantID)
 			tenantChannels, err := s.mongoService.FindTenantChannels(ctx, tenantID)
 			if err != nil {

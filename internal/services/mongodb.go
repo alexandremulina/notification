@@ -27,6 +27,14 @@ type TenantChannels struct {
 	UpdatedAt time.Time       `bson:"updatedAt" json:"updatedAt"`
 }
 
+// Notification represents a notification document in MongoDB
+type Notification struct {
+	TenantID  string    `bson:"tenantId" json:"tenantId"`
+	Message   string    `bson:"message" json:"message"`
+	CreatedAt time.Time `bson:"createdAt" json:"createdAt"`
+	UpdatedAt time.Time `bson:"updatedAt" json:"updatedAt"`
+}
+
 // MongoDBService handles MongoDB operations
 type MongoDBService struct {
 	client   *mongo.Client
@@ -97,4 +105,28 @@ func (s *MongoDBService) FindTenantChannels(ctx context.Context, tenantID string
 	}
 
 	return &tenantChannels, nil
+}
+
+// StoreNotification saves a notification to MongoDB
+func (s *MongoDBService) StoreNotification(ctx context.Context, tenantID string, message string) error {
+	s.logger.Info("Storing notification", "tenantId", tenantID)
+
+	collection := s.database.Collection("notifications")
+
+	now := time.Now()
+	notification := Notification{
+		TenantID:  tenantID,
+		Message:   message,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	_, err := collection.InsertOne(ctx, notification)
+	if err != nil {
+		s.logger.Error("Failed to store notification", "error", err, "tenantId", tenantID)
+		return fmt.Errorf("failed to store notification: %w", err)
+	}
+
+	s.logger.Info("Notification stored successfully", "tenantId", tenantID)
+	return nil
 }
