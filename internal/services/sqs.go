@@ -108,7 +108,6 @@ func (s *SQSService) processAndSendToSNS(ctx context.Context, message *types.Mes
 	} else {
 		tenantID := getStringValue(messageData, "tenantId", "")
 
-		// Store notification in MongoDB if tenant ID is present and MongoDB service is available
 		if tenantID != "" && s.mongoService != nil {
 			// Store the notification in MongoDB
 			if err := s.mongoService.StoreNotification(ctx, tenantID, *message.Body); err != nil {
@@ -155,17 +154,14 @@ func (s *SQSService) processAndSendToSNS(ctx context.Context, message *types.Mes
 		"sms":             smsAddress,
 	}
 
-	// Add email address if found
 	if emailAddress != "" {
 		messageWithChannels["email"] = emailAddress
 	}
 
-	// Add webhook address if found
 	if webhookAddress != "" {
 		messageWithChannels["webhook"] = webhookAddress
 	}
 
-	// Add SMS address if found
 	if smsAddress != "" {
 		messageWithChannels["sms"] = smsAddress
 	}
@@ -198,21 +194,6 @@ func getStringValue(data map[string]interface{}, key, defaultValue string) strin
 		}
 	}
 	return defaultValue
-}
-
-func getStringArray(data map[string]interface{}, key string) []string {
-	if val, ok := data[key]; ok {
-		if arrVal, ok := val.([]interface{}); ok {
-			result := make([]string, 0, len(arrVal))
-			for _, v := range arrVal {
-				if strVal, ok := v.(string); ok {
-					result = append(result, strVal)
-				}
-			}
-			return result
-		}
-	}
-	return []string{}
 }
 
 func (s *SQSService) DeleteMessage(ctx context.Context, receiptHandle string) error {
@@ -264,7 +245,6 @@ func (s *SQSService) ReceiveMessageWithCount(ctx context.Context, maxMessages in
 
 	// s.logger.Info("SQS poll completed", "messagesReceived", len(result.Messages))
 
-	// Process messages and send to SNS if available
 	if len(result.Messages) > 0 && s.snsService != nil {
 		// Process all messages in the batch
 		for i := range result.Messages {

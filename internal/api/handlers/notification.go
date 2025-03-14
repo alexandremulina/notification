@@ -236,7 +236,7 @@ func (h *NotificationHandler) GetMetrics(c *gin.Context) {
 	c.JSON(http.StatusOK, metrics)
 }
 
-func (h *NotificationHandler) processMessage(ctx context.Context, message types.Message) error {
+func (h *NotificationHandler) processMessage(_ context.Context, message types.Message) error {
 	var parsedBody interface{}
 	if err := json.Unmarshal([]byte(*message.Body), &parsedBody); err != nil {
 		return nil
@@ -318,11 +318,10 @@ func (h *NotificationHandler) PollSQS(c *gin.Context) {
 }
 
 func (h *NotificationHandler) StopPolling() {
-	// Use a mutex to ensure only one goroutine can stop the polling
+
 	h.stopMutex.Lock()
 	defer h.stopMutex.Unlock()
 
-	// Log state before stopping
 	log.Printf("StopPolling called, current isPolling: %v", h.isPolling)
 
 	// Force stop even if flag says not polling
@@ -344,7 +343,7 @@ func (h *NotificationHandler) processMessageWithRetries(ctx context.Context, mes
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		err := h.processMessage(ctx, message)
 		if err == nil {
-			return nil // Success!
+			return nil
 		}
 
 		log.Printf("Error processing message (attempt %d/%d): %v",
@@ -376,7 +375,7 @@ func (h *NotificationHandler) deleteMessageWithRetries(ctx context.Context, rece
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		err := h.sqsService.DeleteMessage(ctx, receiptHandle)
 		if err == nil {
-			return nil // Success!
+			return nil
 		}
 
 		log.Printf("Error deleting message (attempt %d/%d): %v",
@@ -399,21 +398,6 @@ func (h *NotificationHandler) deleteMessageWithRetries(ctx context.Context, rece
 	}
 
 	return fmt.Errorf("exhausted retries for deleting message with receipt handle %s", receiptHandle)
-}
-
-// Helper functions for min and max operations
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // // ConfigureWorkerPool allows dynamic configuration of the worker pool
