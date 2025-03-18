@@ -17,6 +17,7 @@ type TenantChannel struct {
 	Type   string `bson:"type" json:"type"`
 	Value  string `bson:"value" json:"value"`
 	Enable bool   `bson:"enable" json:"enable"`
+	Secret string `bson:"secret" json:"secret"`
 }
 
 // TenantChannels represents a tenant channels configuration in MongoDB

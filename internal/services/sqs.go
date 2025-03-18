@@ -100,6 +100,7 @@ func (s *SQSService) processAndSendToSNS(ctx context.Context, message *types.Mes
 	var slackWebhook string
 	var emailAddress string
 	var webhookAddress string
+	var webhookSecret string
 	var smsAddress string
 
 	var messageData map[string]interface{}
@@ -130,7 +131,8 @@ func (s *SQSService) processAndSendToSNS(ctx context.Context, message *types.Mes
 							s.logger.Info("Using email from MongoDB", "email", emailAddress, "tenantId", tenantID)
 						case "webhook":
 							webhookAddress = channel.Value
-							s.logger.Info("Using webhook from MongoDB", "webhook", webhookAddress, "tenantId", tenantID)
+							webhookSecret = channel.Secret
+							s.logger.Info("Using webhook from MongoDB", "webhook", webhookAddress, "tenantId", tenantID, "secret", webhookSecret)
 						case "sms":
 							smsAddress = channel.Value
 							s.logger.Info("Using SMS from MongoDB", "sms", smsAddress, "tenantId", tenantID)
@@ -151,6 +153,7 @@ func (s *SQSService) processAndSendToSNS(ctx context.Context, message *types.Mes
 		"slackWebhookUrl": slackWebhook,
 		"email":           emailAddress,
 		"webhook":         webhookAddress,
+		"webhookSecret":   webhookSecret,
 		"sms":             smsAddress,
 	}
 
